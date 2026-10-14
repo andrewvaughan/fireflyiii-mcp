@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-14
+
 ### Security
 
 - **Bumped transitive `proxy-addr` from 2.0.7 to 2.0.8**, resolving [GHSA-jqcg-44mw-7w3h](https://github.com/advisories/GHSA-jqcg-44mw-7w3h) (critical severity), IP spoofing via an IPv4-mapped IPv6 address matching a trusted subnet. It comes in through `@modelcontextprotocol/sdk`'s `express` dependency; this server's HTTP transport does not use Express or its trust-proxy logic, so it was not exploitable here.
@@ -227,7 +229,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - npm publish provenance via GitHub OIDC.
 - GitHub Release auto-created from the tag annotation on each `v*` tag push.
 
-[Unreleased]: https://github.com/daften/fireflyiii-mcp/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/daften/fireflyiii-mcp/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/daften/fireflyiii-mcp/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/daften/fireflyiii-mcp/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/daften/fireflyiii-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/daften/fireflyiii-mcp/compare/v0.4.6...v0.5.0
