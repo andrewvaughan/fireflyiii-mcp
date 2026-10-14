@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Bumped transitive `proxy-addr` from 2.0.7 to 2.0.8**, resolving [GHSA-jqcg-44mw-7w3h](https://github.com/advisories/GHSA-jqcg-44mw-7w3h) (critical severity), IP spoofing via an IPv4-mapped IPv6 address matching a trusted subnet. It comes in through `@modelcontextprotocol/sdk`'s `express` dependency; this server's HTTP transport does not use Express or its trust-proxy logic, so it was not exploitable here.
 - **Bumped transitive `fast-uri` from 3.1.7 to 3.1.8**, resolving [GHSA-hrr3-gc8f-f4qj](https://github.com/advisories/GHSA-hrr3-gc8f-f4qj) (moderate severity), inconsistent host case normalization via percent-encoded octets.
+- **Bumped `@modelcontextprotocol/sdk` from 1.30.0 to 1.32.1**, resolving [GHSA-6qxp-vccf-f47h](https://github.com/advisories/GHSA-6qxp-vccf-f47h) (high severity), where the SDK's OAuth client could send credentials to an authorization server chosen by the MCP server. This server only uses the SDK's server side, never its OAuth client, so it was not exploitable here.
+- **Bumped dev-only `vue` from 3.5.41 to 3.5.44 and `source-map-js` from 1.2.1 to 1.2.2** (both via the VitePress docs toolchain), resolving [GHSA-g2v6-rqmx-r4w6](https://github.com/advisories/GHSA-g2v6-rqmx-r4w6) (high severity, XSS in `@vue/server-renderer` via a missing CR in its attribute-name blacklist) and [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q) (high severity, event-loop denial of service through indexed source-map section offsets). Neither ships in the published package.
 
 ## [0.5.2] - 2026-09-29
 
