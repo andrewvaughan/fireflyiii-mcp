@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Bumped transitive `proxy-addr` from 2.0.7 to 2.0.8**, resolving [GHSA-jqcg-44mw-7w3h](https://github.com/advisories/GHSA-jqcg-44mw-7w3h) (critical severity), IP spoofing via an IPv4-mapped IPv6 address matching a trusted subnet. It comes in through `@modelcontextprotocol/sdk`'s `express` dependency; this server's HTTP transport does not use Express or its trust-proxy logic, so it was not exploitable here.
+- **Bumped transitive `fast-uri` from 3.1.7 to 3.1.8**, resolving [GHSA-hrr3-gc8f-f4qj](https://github.com/advisories/GHSA-hrr3-gc8f-f4qj) (moderate severity), inconsistent host case normalization via percent-encoded octets.
+
 ## [0.5.2] - 2026-09-29
 
 ### Security
