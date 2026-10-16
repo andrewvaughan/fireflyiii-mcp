@@ -1,3 +1,5 @@
+import { readFile, realpath, stat } from 'node:fs/promises';
+import { isAbsolute } from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { FireflyClient } from '../client.js';
@@ -56,6 +58,43 @@ export async function uploadAttachment(
 ): Promise<{ uploaded: true; id: string }> {
   await client.postBinary(`/attachments/${id}/upload`, content);
   return { uploaded: true, id };
+}
+
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+/**
+ * Household fork: a tool argument cannot carry a real PDF as base64, so upload_attachment can also read a file from
+ * a folder shared with the agent. Only folders listed in FIREFLY_MCP_UPLOAD_PATHS (colon-separated) are allowed, and
+ * with none listed the option is off. The file is read through its resolved path, so a symlink cannot be swapped in
+ * between the check and the read.
+ */
+export async function readUploadFile(filePath: string): Promise<Uint8Array> {
+  const allowed = (process.env.FIREFLY_MCP_UPLOAD_PATHS ?? '')
+    .split(':')
+    .map((dir) => dir.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+  if (allowed.length === 0) {
+    throw new Error('Uploading from file_path is turned off on this server (FIREFLY_MCP_UPLOAD_PATHS is not set).');
+  }
+  if (!isAbsolute(filePath)) throw new Error('file_path must be an absolute path');
+  let real: string;
+  try {
+    real = await realpath(filePath);
+  } catch {
+    throw new Error(`File not found: ${filePath}`);
+  }
+  if (!allowed.some((dir) => real === dir || real.startsWith(`${dir}/`))) {
+    throw new Error(`file_path is outside the allowed upload folders (${allowed.join(', ')})`);
+  }
+  const info = await stat(real);
+  if (!info.isFile()) throw new Error('file_path must point to a regular file');
+  if (info.size === 0) throw new Error('File is empty');
+  if (info.size > MAX_UPLOAD_BYTES) {
+    throw new Error(
+      `File is ${Math.round(info.size / 1024 / 1024)} MB; the limit is ${MAX_UPLOAD_BYTES / 1024 / 1024} MB`,
+    );
+  }
+  return readFile(real);
 }
 
 export interface DownloadedAttachment {
@@ -195,14 +234,25 @@ export function registerAttachmentTools(server: McpServer, client: FireflyClient
     {
       title: 'Upload Attachment File',
       description:
-        'Upload the binary content for an existing attachment record. Call create_attachment first to get the attachment ID, then call this tool with the base64-encoded file content. The two-step workflow: (1) create_attachment → get ID, (2) upload_attachment with that ID and content_base64.',
+        'Upload the binary content for an existing attachment record. Call create_attachment first to get the attachment ID, then call this tool with the file: either file_path (an absolute path in a folder this server is allowed to read, the way to send a real PDF) or content_base64. The two-step workflow: (1) create_attachment → get ID, (2) upload_attachment with that ID and the file.',
       inputSchema: {
         id: z.string().describe('Attachment ID from create_attachment'),
-        content_base64: z.string().describe('File content encoded as base64'),
+        file_path: z
+          .string()
+          .optional()
+          .describe('Absolute path of the file, inside a folder listed in FIREFLY_MCP_UPLOAD_PATHS'),
+        content_base64: z.string().optional().describe('File content encoded as base64 (small files only)'),
       },
       annotations: WRITE_ANNOTATIONS,
     },
-    ({ id, content_base64 }) => uploadAttachment(client, id, Buffer.from(content_base64, 'base64')),
+    async ({ id, file_path, content_base64 }) => {
+      if ((file_path === undefined) === (content_base64 === undefined)) {
+        throw new Error('Provide exactly one of file_path or content_base64.');
+      }
+      const content =
+        file_path !== undefined ? await readUploadFile(file_path) : Buffer.from(content_base64 as string, 'base64');
+      return uploadAttachment(client, id, content);
+    },
   );
 
   defineContentTool(

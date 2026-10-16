@@ -10,6 +10,29 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that c
 
 📖 **[Full documentation → daften.github.io/fireflyiii-mcp](https://daften.github.io/fireflyiii-mcp/)**
 
+## What this fork changes
+
+This is Andrew Vaughan's fork of [daften/fireflyiii-mcp](https://github.com/daften/fireflyiii-mcp), used by a household AI agent that keeps the family's Firefly III books. It is built from source and nothing here is published to npm. The `household` branch is upstream release v0.5.3 (commit `eb8b6ca`) plus one commit, and every change is marked "Household fork" in the source.
+
+| Change | Why | Files |
+|---|---|---|
+| `update_transaction` reads the entry first, edits one named line (`transaction_journal_id`, required when the entry has several lines), and sends every other line back by its id | Firefly deletes every line of an entry that a PUT leaves out. Upstream sent one line with no id, so editing a split entry deleted its other lines (the same class of loss that removed 46 mortgage interest lines from these books on 2026-10-10) | `src/tools/transactions.ts` (`updateTransaction`, `fetchJournals`) |
+| `update_transaction` refuses a new amount | Amounts come from the bank's import. Dividing a charge across lines goes through `split_transaction`, which checks the total | `src/tools/transactions.ts` |
+| New `split_transaction` tool: divides an existing entry into item lines that must add up to its total to the cent, reusing existing lines (same amount first, then in order) and refusing to remove a line that holds an attachment | Receipts divide one card charge into items in different categories. Upstream could only do that by creating a new transaction, which these books never do from a receipt | `src/tools/transactions.ts` (`splitTransaction`) |
+| `create_transaction`, `create_split_transaction`, `update_transaction` and `split_transaction` send `apply_rules: false` | So Firefly's rules cannot rewrite the category, description or tags the agent has just set | `src/tools/transactions.ts` (`APPLY_RULES`) |
+| `upload_attachment` also accepts `file_path`, read only from folders listed in `FIREFLY_MCP_UPLOAD_PATHS` (off when unset), through the file's resolved path | A tool argument cannot carry a real PDF as base64, and a receipt has to be attached from a file. Reading the resolved path means a symlink cannot be swapped in after the check | `src/tools/attachments.ts` (`readUploadFile`) |
+
+Not changed, so filter them out of an agent's tools: `bulk_update_transactions` (one query edits many entries, and its `tags` replace each entry's tags), the recurring transaction writes (they still default `apply_rules` to true), and every delete tool.
+
+Tests: `src/tests/transactions.test.ts` (the "household fork" suites), `src/tests/attachments.test.ts` (`readUploadFile`), and the tool counts in `src/tests/tool-filter.test.ts`, one higher in every preset that includes transactions.
+
+### Rebasing onto a new upstream release
+
+1. Fetch upstream and read its changelog, then its diff from `eb8b6ca` for `src/tools/transactions.ts`, `src/tools/attachments.ts` and the tests above.
+2. Drop any change upstream now covers: check whether `update_transaction` sends `transaction_journal_id` and keeps other lines, whether writes still send `apply_rules: true`, whether a tool divides an existing entry, and whether `upload_attachment` takes a file path.
+3. Rebase the `household` branch onto the release, resolve conflicts, then run `npm ci` and `npm run check`. Update the tool counts if upstream added tools.
+4. Review the new commit, then point the deployment at it.
+
 ## What you can ask
 
 Once configured, you can ask things like:

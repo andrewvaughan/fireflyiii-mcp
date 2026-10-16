@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { FireflyClient } from '../client.js';
 import {
@@ -7,6 +10,7 @@ import {
   downloadAttachmentContent,
   fetchAttachment,
   fetchAttachments,
+  readUploadFile,
   registerAttachmentTools,
   updateAttachment,
   uploadAttachment,
@@ -139,6 +143,57 @@ describe('uploadAttachment', () => {
     const content = new Uint8Array([1, 2, 3]);
     await uploadAttachment(mockClient, '5', content);
     expect(mockClient.postBinary).toHaveBeenCalledWith('/attachments/5/upload', content);
+  });
+});
+
+describe('readUploadFile (household fork)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ff-upload-'));
+  const allowed = join(root, 'uploads');
+  const outside = join(root, 'outside');
+  mkdirSync(allowed);
+  mkdirSync(outside);
+  writeFileSync(join(allowed, 'receipt.pdf'), '%PDF-1.4 test');
+  writeFileSync(join(outside, 'secret.txt'), 'nope');
+  writeFileSync(join(allowed, 'empty.pdf'), '');
+  symlinkSync(join(outside, 'secret.txt'), join(allowed, 'link.pdf'));
+
+  function withAllowed<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+    const previous = process.env.FIREFLY_MCP_UPLOAD_PATHS;
+    if (value === undefined) delete process.env.FIREFLY_MCP_UPLOAD_PATHS;
+    else process.env.FIREFLY_MCP_UPLOAD_PATHS = value;
+    return run().finally(() => {
+      if (previous === undefined) delete process.env.FIREFLY_MCP_UPLOAD_PATHS;
+      else process.env.FIREFLY_MCP_UPLOAD_PATHS = previous;
+    });
+  }
+
+  it('reads a file inside an allowed folder', async () => {
+    const data = await withAllowed(realpathSync(allowed), () => readUploadFile(join(allowed, 'receipt.pdf')));
+    expect(Buffer.from(data).toString()).toBe('%PDF-1.4 test');
+  });
+
+  it('is off when no folder is allowed', async () => {
+    await expect(withAllowed(undefined, () => readUploadFile(join(allowed, 'receipt.pdf')))).rejects.toThrow(
+      /turned off/,
+    );
+  });
+
+  it('refuses a file outside the allowed folders, including through a symlink', async () => {
+    await expect(withAllowed(realpathSync(allowed), () => readUploadFile(join(outside, 'secret.txt')))).rejects.toThrow(
+      /outside the allowed/,
+    );
+    await expect(withAllowed(realpathSync(allowed), () => readUploadFile(join(allowed, 'link.pdf')))).rejects.toThrow(
+      /outside the allowed/,
+    );
+  });
+
+  it('refuses relative paths and empty files', async () => {
+    await expect(withAllowed(realpathSync(allowed), () => readUploadFile('uploads/receipt.pdf'))).rejects.toThrow(
+      /absolute/,
+    );
+    await expect(withAllowed(realpathSync(allowed), () => readUploadFile(join(allowed, 'empty.pdf')))).rejects.toThrow(
+      /empty/,
+    );
   });
 });
 
