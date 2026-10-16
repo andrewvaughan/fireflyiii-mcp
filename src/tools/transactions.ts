@@ -25,6 +25,30 @@ const GROUP_ID_HINT =
 const groupIdField = (verb: string): string =>
   `Transaction group ID — the top-level \`id\` from get_transaction, not the \`transaction_journal_id\` inside \`transactions[]\`. That is usually an adjacent number, so the wrong one silently ${verb} a different transaction.`;
 
+// Household fork: agent writes never ask Firefly to run its rules, so a rule cannot rewrite the category,
+// description or tags an agent has just set.
+const APPLY_RULES = false;
+
+type Journal = Record<string, unknown> & { transaction_journal_id: string | number; amount: string };
+
+// Household fork: amounts compared in cents, since Firefly returns them with up to 12 decimals.
+function cents(amount: unknown): number {
+  return Math.round(Number(amount) * 100);
+}
+
+async function fetchJournals(
+  client: FireflyClient,
+  id: string,
+): Promise<{ groupTitle: string | null; journals: Journal[] }> {
+  const response = await client.get<JsonApiSingleResponse>(`/transactions/${id}`);
+  const attributes = (response?.data?.attributes ?? {}) as Record<string, unknown>;
+  const journals = Array.isArray(attributes.transactions) ? (attributes.transactions as Journal[]) : [];
+  if (journals.length === 0) {
+    throw new Error(`Transaction ${id} has no lines. Check the group id with get_transaction.`);
+  }
+  return { groupTitle: (attributes.group_title as string | null) ?? null, journals };
+}
+
 export async function fetchTransactions(
   client: FireflyClient,
   params: {
@@ -90,17 +114,24 @@ export async function createTransaction(
   if (params.notes !== undefined) split.notes = params.notes;
   if (params.tags !== undefined) split.tags = params.tags;
   const response = await client.post<JsonApiSingleResponse>('/transactions', {
-    apply_rules: true,
+    apply_rules: APPLY_RULES,
     fire_webhooks: true,
     transactions: [split],
   });
   return unwrapSingle(response);
 }
 
+/**
+ * Household fork: Firefly deletes every line of an entry that a PUT leaves out, and upstream sent a single line with
+ * no `transaction_journal_id`, so editing a split entry deleted its other lines. This version reads the entry first,
+ * edits one named line (required when there are several), and sends every other line back by its id, unchanged.
+ * It also refuses a new amount: amounts come from the bank, and `split_transaction` divides a charge across lines.
+ */
 export async function updateTransaction(
   client: FireflyClient,
   id: string,
   params: {
+    transaction_journal_id?: string;
     type?: 'withdrawal' | 'deposit' | 'transfer';
     date?: string;
     amount?: string;
@@ -114,7 +145,26 @@ export async function updateTransaction(
     tags?: string[];
   },
 ): Promise<UnwrappedSingle> {
-  const split: Record<string, unknown> = {};
+  const { groupTitle, journals } = await fetchJournals(client, id);
+  const lineIds = journals.map((journal) => String(journal.transaction_journal_id));
+  let lineId = params.transaction_journal_id;
+  if (lineId === undefined) {
+    if (journals.length > 1) {
+      throw new Error(
+        `Transaction ${id} has ${journals.length} lines (${lineIds.join(', ')}). Pass transaction_journal_id for the line to change; the other lines are kept. To change how the charge is divided, use split_transaction.`,
+      );
+    }
+    lineId = lineIds[0];
+  } else if (!lineIds.includes(String(lineId))) {
+    throw new Error(`Line ${lineId} is not part of transaction ${id}; its lines are ${lineIds.join(', ')}.`);
+  }
+  const target = journals[lineIds.indexOf(String(lineId))];
+  if (params.amount !== undefined && cents(params.amount) !== cents(target.amount)) {
+    throw new Error(
+      `Amounts come from the bank and are not changed here (line ${lineId} is ${Number(target.amount).toFixed(2)}). To divide a charge across lines, use split_transaction.`,
+    );
+  }
+  const split: Record<string, unknown> = { transaction_journal_id: String(lineId) };
   if (params.type !== undefined) split.type = params.type;
   if (params.date !== undefined) split.date = params.date;
   if (params.amount !== undefined) split.amount = params.amount;
@@ -126,11 +176,96 @@ export async function updateTransaction(
   if (params.currency_code !== undefined) split.currency_code = params.currency_code;
   if (params.notes !== undefined) split.notes = params.notes;
   if (params.tags !== undefined) split.tags = params.tags;
-  const response = await client.put<JsonApiSingleResponse>(`/transactions/${id}`, {
-    apply_rules: true,
+  const others = lineIds
+    .filter((other) => other !== String(lineId))
+    .map((other) => ({ transaction_journal_id: other }));
+  const body: Record<string, unknown> = {
+    apply_rules: APPLY_RULES,
     fire_webhooks: true,
-    transactions: [split],
+    transactions: [split, ...others],
+  };
+  // Firefly requires a group title on an entry with more than one line.
+  if (journals.length > 1) body.group_title = groupTitle ?? String(journals[0].description ?? '');
+  const response = await client.put<JsonApiSingleResponse>(`/transactions/${id}`, body);
+  return unwrapSingle(response);
+}
+
+/**
+ * Household fork: divides an existing charge into item lines (a receipt with items in different categories) without
+ * creating a transaction. The lines must add up to the charge to the cent. Existing lines are reused, a line of the
+ * same amount first and then in order, so their ids, external ids and attachments stay; a line left over is removed,
+ * which is refused when it has an attachment. Accounts, type and date come from the existing lines.
+ */
+export async function splitTransaction(
+  client: FireflyClient,
+  id: string,
+  params: {
+    group_title?: string;
+    lines: Array<{
+      amount: string;
+      description: string;
+      category_name?: string;
+      budget_id?: string;
+      tags?: string[];
+      notes?: string;
+    }>;
+  },
+): Promise<UnwrappedSingle> {
+  const { groupTitle, journals } = await fetchJournals(client, id);
+  const charge = journals.reduce((sum, journal) => sum + cents(journal.amount), 0);
+  const total = params.lines.reduce((sum, line) => sum + cents(line.amount), 0);
+  if (total !== charge) {
+    throw new Error(
+      `The lines add up to ${(total / 100).toFixed(2)}, but the charge is ${(charge / 100).toFixed(2)}. They must match to the cent.`,
+    );
+  }
+  const free = [...journals];
+  const claimed = new Map<number, Journal>();
+  params.lines.forEach((line, index) => {
+    const same = free.find((journal) => cents(journal.amount) === cents(line.amount));
+    if (same) {
+      claimed.set(index, same);
+      free.splice(free.indexOf(same), 1);
+    }
   });
+  params.lines.forEach((_line, index) => {
+    if (!claimed.has(index) && free.length > 0) claimed.set(index, free.shift() as Journal);
+  });
+  if (free.length > 0) {
+    const dropped = new Set(free.map((journal) => String(journal.transaction_journal_id)));
+    const attachments = await client.get<JsonApiListResponse>(`/transactions/${id}/attachments`);
+    const held = (attachments?.data ?? []).filter((attachment) =>
+      dropped.has(String((attachment.attributes as Record<string, unknown>)?.attachable_id)),
+    );
+    if (held.length > 0) {
+      throw new Error(
+        `Splitting into ${params.lines.length} lines would remove line(s) ${[...dropped].join(', ')}, which hold attachment(s). Use at least ${journals.length} lines, or ask a person.`,
+      );
+    }
+  }
+  const first = journals[0];
+  const legs = params.lines.map((line, index) => {
+    const base = claimed.get(index) ?? first;
+    const leg: Record<string, unknown> = {
+      type: base.type ?? first.type,
+      date: base.date ?? first.date,
+      amount: (cents(line.amount) / 100).toFixed(2),
+      description: line.description,
+      source_id: base.source_id ?? first.source_id,
+      destination_id: base.destination_id ?? first.destination_id,
+    };
+    if (claimed.has(index)) leg.transaction_journal_id = String((claimed.get(index) as Journal).transaction_journal_id);
+    if (line.category_name !== undefined) leg.category_name = line.category_name;
+    if (line.budget_id !== undefined) leg.budget_id = line.budget_id;
+    if (line.tags !== undefined) leg.tags = line.tags;
+    if (line.notes !== undefined) leg.notes = line.notes;
+    return leg;
+  });
+  const body: Record<string, unknown> = { apply_rules: APPLY_RULES, fire_webhooks: true, transactions: legs };
+  if (legs.length > 1) {
+    body.group_title = params.group_title ?? groupTitle ?? String(first.description ?? '');
+  }
+  const response = await client.put<JsonApiSingleResponse>(`/transactions/${id}`, body);
   return unwrapSingle(response);
 }
 
@@ -197,7 +332,7 @@ export async function createSplitTransaction(
     if (split.notes !== undefined) item.notes = split.notes;
     return item;
   });
-  const body: Record<string, unknown> = { apply_rules: true, fire_webhooks: true, transactions };
+  const body: Record<string, unknown> = { apply_rules: APPLY_RULES, fire_webhooks: true, transactions };
   if (params.group_title !== undefined) body.group_title = params.group_title;
   const response = await client.post<JsonApiSingleResponse>('/transactions', body);
   return unwrapSingle(response);
@@ -284,14 +419,23 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
     {
       title: 'Update Transaction',
       description:
-        'Update an existing transaction in Firefly III. Only fields provided will be changed. Use get_transaction to confirm the ID before updating.',
+        "Update one line of an existing transaction in Firefly III. Only fields provided will be changed, and every other line of the entry is kept. An entry with several lines (a split) needs transaction_journal_id to name the line; get_transaction lists them. Amounts cannot be changed (they come from the bank): use split_transaction to divide a charge across lines. Tags replace the line's tag list, so send every tag it should keep. Firefly rules are not run. Use get_transaction to confirm the ID before updating.",
       inputSchema: {
         id: z.string().describe(groupIdField('updates')),
+        transaction_journal_id: z
+          .string()
+          .optional()
+          .describe(
+            'The line to change, from `transactions[].transaction_journal_id` in get_transaction. Required when the entry has more than one line.',
+          ),
         type: z.enum(['withdrawal', 'deposit', 'transfer']).optional().describe('Transaction type'),
         date: dateOrDateTimeSchema
           .optional()
           .describe('Transaction date (YYYY-MM-DD or RFC 3339 date-time with timezone)'),
-        amount: z.string().optional().describe('Amount as a positive number string'),
+        amount: z
+          .string()
+          .optional()
+          .describe("Only accepted when it equals the line's current amount; amounts come from the bank"),
         description: z.string().optional().describe('Short description'),
         source_id: z.string().optional().describe('Source account ID'),
         destination_id: z.string().optional().describe('Destination account ID'),
@@ -304,6 +448,38 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
       annotations: UPDATE_ANNOTATIONS,
     },
     ({ id, ...params }) => updateTransaction(client, id, params),
+  );
+
+  defineTool(
+    server,
+    'split_transaction',
+    {
+      title: 'Split Transaction',
+      description:
+        "Divide an existing transaction into item lines, such as a receipt with items in different categories, without creating a new transaction. The lines must add up to the entry's total to the cent. Existing lines are reused (one of the same amount first, then in order), so their ids and attachments stay; a leftover line is removed, which is refused when it holds an attachment. Accounts, type and date are kept. Firefly rules are not run. Use get_transaction first.",
+      inputSchema: {
+        id: z.string().describe(groupIdField('splits')),
+        group_title: z
+          .string()
+          .optional()
+          .describe("Title for the whole entry when it has more than one line; defaults to the entry's current title"),
+        lines: z
+          .array(
+            z.object({
+              amount: z.string().describe('Amount as a positive number string, e.g. "12.97"'),
+              description: z.string().describe('What this line bought'),
+              category_name: z.string().optional().describe(`Category name. ${CATEGORY_NAME_HINT}`),
+              budget_id: z.string().optional().describe('Budget ID'),
+              tags: z.array(z.string()).optional().describe('Tags for this line (replaces its tags)'),
+              notes: z.string().optional().describe('Notes for this line (replaces its notes)'),
+            }),
+          )
+          .min(1)
+          .describe('The lines the charge is divided into; they must add up to the charge'),
+      },
+      annotations: UPDATE_ANNOTATIONS,
+    },
+    ({ id, ...params }) => splitTransaction(client, id, params),
   );
 
   defineTool(

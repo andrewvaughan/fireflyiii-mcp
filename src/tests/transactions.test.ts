@@ -9,6 +9,7 @@ import {
   fetchTransactions,
   registerTransactionTools,
   searchTransactions,
+  splitTransaction,
   updateTransaction,
 } from '../tools/transactions.js';
 import { createMockServer } from './_helpers.js';
@@ -143,7 +144,7 @@ describe('createTransaction', () => {
       source_id: '1',
     });
     expect(mockClient.post).toHaveBeenCalledWith('/transactions', {
-      apply_rules: true,
+      apply_rules: false,
       fire_webhooks: true,
       transactions: [
         expect.objectContaining({
@@ -169,24 +170,214 @@ describe('createTransaction', () => {
   });
 });
 
-describe('updateTransaction', () => {
-  it('puts to /transactions/:id with wrapped body', async () => {
+// Household fork: a group as Firefly returns it, with one journal per line.
+function groupFixture(journals: Array<Record<string, unknown>>, groupTitle: string | null = null) {
+  return {
+    data: { id: '5', type: 'transactions', attributes: { group_title: groupTitle, transactions: journals }, links: {} },
+  };
+}
+
+const oneLine = groupFixture([
+  {
+    transaction_journal_id: '51',
+    type: 'withdrawal',
+    date: '2024-03-31T00:00:00-04:00',
+    amount: '42.500000000000',
+    description: 'AMAZON MKTPL',
+    source_id: '1',
+    destination_id: '9',
+  },
+]);
+
+const threeLines = groupFixture(
+  [
+    {
+      transaction_journal_id: '61',
+      type: 'withdrawal',
+      date: '2024-03-31',
+      amount: '3.99',
+      description: 'Batteries',
+      source_id: '1',
+      destination_id: '9',
+    },
+    {
+      transaction_journal_id: '62',
+      type: 'withdrawal',
+      date: '2024-03-31',
+      amount: '4.99',
+      description: 'Mascara',
+      source_id: '1',
+      destination_id: '9',
+    },
+    {
+      transaction_journal_id: '63',
+      type: 'withdrawal',
+      date: '2024-03-31',
+      amount: '0.54',
+      description: 'Tax',
+      source_id: '1',
+      destination_id: '9',
+    },
+  ],
+  'Amazon order',
+);
+
+describe('updateTransaction (household fork)', () => {
+  it('names the only line by its id and runs no rules', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(oneLine);
     mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
     await updateTransaction(mockClient, '5', {
       date: '2024-01-15T11:30:00+02:00',
       description: 'Updated',
     });
     expect(mockClient.put).toHaveBeenCalledWith('/transactions/5', {
-      apply_rules: true,
+      apply_rules: false,
       fire_webhooks: true,
-      transactions: [{ date: '2024-01-15T11:30:00+02:00', description: 'Updated' }],
+      transactions: [{ transaction_journal_id: '51', date: '2024-01-15T11:30:00+02:00', description: 'Updated' }],
     });
   });
 
   it('returns unwrapped single', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(oneLine);
     mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
-    const result = await updateTransaction(mockClient, '5', { amount: '50.00' });
+    const result = await updateTransaction(mockClient, '5', { description: 'Groceries' });
     expect(result).toEqual({ description: 'Groceries', amount: '42.50', type: 'withdrawal', id: '5' });
+  });
+
+  it('sends every other line of a split back by id, so Firefly keeps them', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(threeLines);
+    mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await updateTransaction(mockClient, '5', { transaction_journal_id: '62', category_name: 'Personal Care: Makeup' });
+    expect(mockClient.put).toHaveBeenCalledWith('/transactions/5', {
+      apply_rules: false,
+      fire_webhooks: true,
+      group_title: 'Amazon order',
+      transactions: [
+        { transaction_journal_id: '62', category_name: 'Personal Care: Makeup' },
+        { transaction_journal_id: '61' },
+        { transaction_journal_id: '63' },
+      ],
+    });
+  });
+
+  it('refuses a split entry without a named line', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(threeLines);
+    mockClient.put = vi.fn();
+    await expect(updateTransaction(mockClient, '5', { description: 'x' })).rejects.toThrow(/has 3 lines/);
+    expect(mockClient.put).not.toHaveBeenCalled();
+  });
+
+  it('refuses a line that is not part of the entry', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(threeLines);
+    mockClient.put = vi.fn();
+    await expect(updateTransaction(mockClient, '5', { transaction_journal_id: '99', notes: 'x' })).rejects.toThrow(
+      /not part of transaction 5/,
+    );
+    expect(mockClient.put).not.toHaveBeenCalled();
+  });
+
+  it('refuses a new amount but accepts the current one', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(oneLine);
+    mockClient.put = vi.fn();
+    await expect(updateTransaction(mockClient, '5', { amount: '50.00' })).rejects.toThrow(/Amounts come from the bank/);
+    expect(mockClient.put).not.toHaveBeenCalled();
+
+    mockClient.get = vi.fn().mockResolvedValueOnce(oneLine);
+    mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await updateTransaction(mockClient, '5', { amount: '42.50', notes: 'same amount' });
+    expect(mockClient.put).toHaveBeenCalledOnce();
+  });
+});
+
+describe('splitTransaction (household fork)', () => {
+  it('divides a one-line charge into item lines, keeping the existing line for the first', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(oneLine);
+    mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await splitTransaction(mockClient, '5', {
+      group_title: 'Batteries and mascara',
+      lines: [
+        { amount: '30.00', description: 'Batteries', category_name: 'Home: Home Supplies: Misc' },
+        { amount: '12.50', description: 'Mascara', category_name: 'Personal Care: Makeup', tags: ['For Melissa'] },
+      ],
+    });
+    expect(mockClient.put).toHaveBeenCalledWith('/transactions/5', {
+      apply_rules: false,
+      fire_webhooks: true,
+      group_title: 'Batteries and mascara',
+      transactions: [
+        {
+          transaction_journal_id: '51',
+          type: 'withdrawal',
+          date: '2024-03-31T00:00:00-04:00',
+          amount: '30.00',
+          description: 'Batteries',
+          source_id: '1',
+          destination_id: '9',
+          category_name: 'Home: Home Supplies: Misc',
+        },
+        {
+          type: 'withdrawal',
+          date: '2024-03-31T00:00:00-04:00',
+          amount: '12.50',
+          description: 'Mascara',
+          source_id: '1',
+          destination_id: '9',
+          category_name: 'Personal Care: Makeup',
+          tags: ['For Melissa'],
+        },
+      ],
+    });
+  });
+
+  it('refuses lines that do not add up to the charge', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(oneLine);
+    mockClient.put = vi.fn();
+    await expect(
+      splitTransaction(mockClient, '5', {
+        lines: [
+          { amount: '30.00', description: 'a' },
+          { amount: '12.00', description: 'b' },
+        ],
+      }),
+    ).rejects.toThrow(/add up to 42.00, but the charge is 42.50/);
+    expect(mockClient.put).not.toHaveBeenCalled();
+  });
+
+  it('reuses existing lines in order and removes a leftover line that holds no attachment', async () => {
+    mockClient.get = vi
+      .fn()
+      .mockResolvedValueOnce(threeLines)
+      .mockResolvedValueOnce({ data: [], meta: { pagination: {} } });
+    mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await splitTransaction(mockClient, '5', {
+      lines: [
+        { amount: '5.29', description: 'Mascara with tax' },
+        { amount: '4.23', description: 'Batteries with tax' },
+      ],
+    });
+    expect(mockClient.get).toHaveBeenLastCalledWith('/transactions/5/attachments');
+    const body = (mockClient.put as ReturnType<typeof vi.fn>).mock.calls[0][1] as {
+      transactions: Array<Record<string, unknown>>;
+    };
+    expect(body.transactions.map((line) => line.transaction_journal_id)).toEqual(['61', '62']);
+    expect(body.transactions.map((line) => line.amount)).toEqual(['5.29', '4.23']);
+  });
+
+  it('refuses to remove a line that holds an attachment', async () => {
+    mockClient.get = vi
+      .fn()
+      .mockResolvedValueOnce(threeLines)
+      .mockResolvedValueOnce({ data: [{ id: '7', type: 'attachments', attributes: { attachable_id: '63' } }] });
+    mockClient.put = vi.fn();
+    await expect(
+      splitTransaction(mockClient, '5', {
+        lines: [
+          { amount: '4.53', description: 'a' },
+          { amount: '4.99', description: 'b' },
+        ],
+      }),
+    ).rejects.toThrow(/hold attachment/);
+    expect(mockClient.put).not.toHaveBeenCalled();
   });
 });
 
@@ -236,7 +427,7 @@ describe('createSplitTransaction', () => {
       ],
     });
     expect(mockClient.post).toHaveBeenCalledWith('/transactions', {
-      apply_rules: true,
+      apply_rules: false,
       fire_webhooks: true,
       transactions: [
         {
