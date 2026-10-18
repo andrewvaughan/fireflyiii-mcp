@@ -169,6 +169,28 @@ describe('createTransaction', () => {
     });
     expect(result).toEqual({ description: 'Groceries', amount: '42.50', type: 'withdrawal', id: '5' });
   });
+
+  it('sends a book date only when given (household fork)', async () => {
+    mockClient.post = vi.fn().mockResolvedValue(writeSingleFixture);
+    await createTransaction(mockClient, {
+      type: 'transfer',
+      date: '2026-10-05',
+      book_date: '2026-10-02',
+      amount: '6144.62',
+      description: 'Credit card payment',
+      source_id: '2',
+      destination_id: '1',
+    });
+    expect(mockClient.post).toHaveBeenLastCalledWith(
+      '/transactions',
+      expect.objectContaining({
+        transactions: [expect.objectContaining({ date: '2026-10-05', book_date: '2026-10-02' })],
+      }),
+    );
+    await createTransaction(mockClient, { type: 'withdrawal', date: '2026-10-05', amount: '1.00', description: 'x' });
+    const body = vi.mocked(mockClient.post).mock.calls[1][1] as { transactions: Array<Record<string, unknown>> };
+    expect(body.transactions[0]).not.toHaveProperty('book_date');
+  });
 });
 
 // Household fork: a group as Firefly returns it, with one journal per line.
@@ -275,6 +297,17 @@ describe('updateTransaction (household fork)', () => {
       /not part of transaction 5/,
     );
     expect(mockClient.put).not.toHaveBeenCalled();
+  });
+
+  it('turns a withdrawal into a transfer with a book date', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(oneLine);
+    mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await updateTransaction(mockClient, '5', { type: 'transfer', destination_id: '3', book_date: '2024-03-29' });
+    expect(mockClient.put).toHaveBeenCalledWith('/transactions/5', {
+      apply_rules: false,
+      fire_webhooks: true,
+      transactions: [{ transaction_journal_id: '51', type: 'transfer', book_date: '2024-03-29', destination_id: '3' }],
+    });
   });
 
   it('refuses a new amount but accepts the current one', async () => {

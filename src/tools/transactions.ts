@@ -90,11 +90,20 @@ export async function fetchTransaction(client: FireflyClient, id: string): Promi
  */
 const DUPLICATE_GUARD = { error_if_duplicate_hash: true } as const;
 
+/**
+ * Household fork: a transfer between two of the family's accounts often reaches the receiving account a day or more
+ * before or after it leaves the paying one, so each account matches its own statement only with both dates. Firefly
+ * keeps the second as `book_date`; create and update pass it through.
+ */
+export const BOOK_DATE_HINT =
+  "For a transfer: the day the money reached the receiving account, from that account's statement, when it differs from date (the day it left the paying account).";
+
 export async function createTransaction(
   client: FireflyClient,
   params: {
     type: 'withdrawal' | 'deposit' | 'transfer';
     date: string;
+    book_date?: string;
     amount: string;
     description: string;
     source_id?: string;
@@ -112,6 +121,7 @@ export async function createTransaction(
     amount: params.amount,
     description: params.description,
   };
+  if (params.book_date !== undefined) split.book_date = params.book_date;
   if (params.source_id !== undefined) split.source_id = params.source_id;
   if (params.destination_id !== undefined) split.destination_id = params.destination_id;
   if (params.category_name !== undefined) split.category_name = params.category_name;
@@ -141,6 +151,7 @@ export async function updateTransaction(
     transaction_journal_id?: string;
     type?: 'withdrawal' | 'deposit' | 'transfer';
     date?: string;
+    book_date?: string;
     amount?: string;
     description?: string;
     source_id?: string;
@@ -174,6 +185,7 @@ export async function updateTransaction(
   const split: Record<string, unknown> = { transaction_journal_id: String(lineId) };
   if (params.type !== undefined) split.type = params.type;
   if (params.date !== undefined) split.date = params.date;
+  if (params.book_date !== undefined) split.book_date = params.book_date;
   if (params.amount !== undefined) split.amount = params.amount;
   if (params.description !== undefined) split.description = params.description;
   if (params.source_id !== undefined) split.source_id = params.source_id;
@@ -444,6 +456,7 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
       inputSchema: {
         type: z.enum(['withdrawal', 'deposit', 'transfer']).describe('Transaction type'),
         date: dateOrDateTimeSchema.describe('Transaction date (YYYY-MM-DD or RFC 3339 date-time with timezone)'),
+        book_date: dateOrDateTimeSchema.optional().describe(BOOK_DATE_HINT),
         amount: z.string().describe('Amount as a positive number string, e.g. "42.50"'),
         description: z.string().describe('Short description of the transaction'),
         source_id: z.string().optional().describe('Source account ID (required for withdrawals and transfers)'),
@@ -478,6 +491,7 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
         date: dateOrDateTimeSchema
           .optional()
           .describe('Transaction date (YYYY-MM-DD or RFC 3339 date-time with timezone)'),
+        book_date: dateOrDateTimeSchema.optional().describe(BOOK_DATE_HINT),
         amount: z
           .string()
           .optional()
