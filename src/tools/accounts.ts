@@ -92,7 +92,18 @@ export async function updateAccount(
   return unwrapSingle(response);
 }
 
+/**
+ * Household fork: Firefly deletes every entry on an account together with the account, so a delete is refused while
+ * the account still has any entries. Move them to another account or delete them first.
+ */
 export async function deleteAccount(client: FireflyClient, id: string): Promise<{ deleted: true; id: string }> {
+  const entries = await client.get<JsonApiListResponse>(`/accounts/${id}/transactions`, { page: 1, limit: 1 });
+  const total = entries?.meta?.pagination?.total ?? entries?.data?.length ?? 0;
+  if (total > 0) {
+    throw new Error(
+      `Account ${id} still has ${total} ${total === 1 ? 'entry' : 'entries'}, and Firefly deletes every entry with the account. Move them to another account or delete them first.`,
+    );
+  }
   await client.delete(`/accounts/${id}`);
   return { deleted: true, id };
 }

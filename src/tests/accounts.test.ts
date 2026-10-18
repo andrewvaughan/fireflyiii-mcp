@@ -178,16 +178,28 @@ describe('updateAccount', () => {
   });
 });
 
-describe('deleteAccount', () => {
-  it('calls delete on /accounts/:id', async () => {
+describe('deleteAccount (household fork)', () => {
+  const empty = { data: [], meta: { pagination: { current_page: 1, total_pages: 0, total: 0 } } };
+  it('calls delete on /accounts/:id when the account has no entries', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(empty);
     mockClient.delete = vi.fn().mockResolvedValueOnce(undefined);
     await deleteAccount(mockClient, '10');
+    expect(mockClient.get).toHaveBeenCalledWith('/accounts/10/transactions', { page: 1, limit: 1 });
     expect(mockClient.delete).toHaveBeenCalledWith('/accounts/10');
   });
   it('returns deleted confirmation', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(empty);
     mockClient.delete = vi.fn().mockResolvedValueOnce(undefined);
     const result = await deleteAccount(mockClient, '10');
     expect(result).toEqual({ deleted: true, id: '10' });
+  });
+  it('refuses an account that still has entries', async () => {
+    mockClient.get = vi
+      .fn()
+      .mockResolvedValueOnce({ data: [{}], meta: { pagination: { current_page: 1, total_pages: 12, total: 12 } } });
+    mockClient.delete = vi.fn();
+    await expect(deleteAccount(mockClient, '10')).rejects.toThrow(/still has 12 entries/);
+    expect(mockClient.delete).not.toHaveBeenCalled();
   });
 });
 
