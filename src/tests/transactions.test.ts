@@ -382,17 +382,59 @@ describe('splitTransaction (household fork)', () => {
   });
 });
 
-describe('deleteTransaction', () => {
-  it('calls delete on /transactions/:id', async () => {
-    mockClient.delete = vi.fn().mockResolvedValueOnce(undefined);
-    await deleteTransaction(mockClient, '5');
-    expect(mockClient.delete).toHaveBeenCalledWith('/transactions/5');
+describe('deleteTransaction (household fork)', () => {
+  const NOW = new Date('2026-10-18T12:00:00-04:00');
+  const line = (extra: Record<string, unknown>) => ({
+    transaction_journal_id: 7,
+    amount: '42.500000000000',
+    date: '2026-09-01T00:00:00-04:00',
+    description: 'Groceries',
+    source_name: 'Checking',
+    destination_name: 'Kroger',
+    category_name: 'Food & Dining: Groceries',
+    ...extra,
   });
 
-  it('returns deleted confirmation', async () => {
+  it('reads the entry, deletes it, and returns what it removed', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(groupFixture([line({ external_id: 'ff3-ACT-1-TRN-2' })], 'Kroger'));
     mockClient.delete = vi.fn().mockResolvedValueOnce(undefined);
-    const result = await deleteTransaction(mockClient, '5');
-    expect(result).toEqual({ deleted: true, id: '5' });
+    const result = await deleteTransaction(mockClient, '5', NOW);
+    expect(mockClient.delete).toHaveBeenCalledWith('/transactions/5');
+    expect(result).toEqual({
+      deleted: true,
+      id: '5',
+      title: 'Kroger',
+      lines: [
+        {
+          transaction_journal_id: '7',
+          date: '2026-09-01',
+          amount: '42.50',
+          description: 'Groceries',
+          source_name: 'Checking',
+          destination_name: 'Kroger',
+          category_name: 'Food & Dining: Groceries',
+          external_id: 'ff3-ACT-1-TRN-2',
+        },
+      ],
+    });
+  });
+
+  it('refuses an entry the bank import brought in within the last 8 days', async () => {
+    mockClient.get = vi
+      .fn()
+      .mockResolvedValueOnce(
+        groupFixture([line({ date: '2026-10-15T00:00:00-04:00', external_id: 'ff3-ACT-1-TRN-3' })]),
+      );
+    mockClient.delete = vi.fn();
+    await expect(deleteTransaction(mockClient, '5', NOW)).rejects.toThrow(/bank import within the last 8 days/);
+    expect(mockClient.delete).not.toHaveBeenCalled();
+  });
+
+  it('deletes a recent entry that did not come from the import', async () => {
+    mockClient.get = vi.fn().mockResolvedValueOnce(groupFixture([line({ date: '2026-10-17T00:00:00-04:00' })]));
+    mockClient.delete = vi.fn().mockResolvedValueOnce(undefined);
+    await deleteTransaction(mockClient, '5', NOW);
+    expect(mockClient.delete).toHaveBeenCalledWith('/transactions/5');
   });
 });
 
