@@ -276,9 +276,43 @@ export async function splitTransaction(
   return unwrapSingle(response);
 }
 
-export async function deleteTransaction(client: FireflyClient, id: string): Promise<{ deleted: true; id: string }> {
+/**
+ * Household fork: the bank import (external ids starting `ff3-`) looks back 7 days each night and re-creates any
+ * entry it cannot find, so a delete of an entry it brought in during the last 8 days is refused. A delete reads the
+ * entry first and returns what it removed, so the agent can report the lines, amounts and external ids it deleted.
+ */
+export const IMPORT_WINDOW_DAYS = 8;
+
+export async function deleteTransaction(
+  client: FireflyClient,
+  id: string,
+  now: Date = new Date(),
+): Promise<{ deleted: true; id: string; title: string | null; lines: Array<Record<string, unknown>> }> {
+  const { groupTitle, journals } = await fetchJournals(client, id);
+  const recent = journals.filter((journal) => {
+    const external = String(journal.external_id ?? '');
+    const date = new Date(String(journal.date ?? ''));
+    const ageDays = (now.getTime() - date.getTime()) / 86_400_000;
+    return external.startsWith('ff3-') && !Number.isNaN(ageDays) && ageDays < IMPORT_WINDOW_DAYS;
+  });
+  if (recent.length > 0) {
+    const dates = recent.map((journal) => String(journal.date).slice(0, 10)).join(', ');
+    throw new Error(
+      `Transaction ${id} came from the bank import within the last ${IMPORT_WINDOW_DAYS} days (${dates}). The nightly import looks back 7 days and would re-create it; delete it once it is ${IMPORT_WINDOW_DAYS} days old.`,
+    );
+  }
   await client.delete(`/transactions/${id}`);
-  return { deleted: true, id };
+  const lines = journals.map((journal) => ({
+    transaction_journal_id: String(journal.transaction_journal_id),
+    date: String(journal.date ?? '').slice(0, 10),
+    amount: Number(journal.amount).toFixed(2),
+    description: journal.description,
+    source_name: journal.source_name,
+    destination_name: journal.destination_name,
+    category_name: journal.category_name ?? null,
+    external_id: journal.external_id ?? null,
+  }));
+  return { deleted: true, id, title: groupTitle, lines };
 }
 
 export async function searchTransactions(
@@ -500,7 +534,7 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
     {
       title: 'Delete Transaction',
       description:
-        'Permanently delete a transaction from Firefly III. **This action cannot be undone.** Use get_transaction to confirm the transaction before deleting.',
+        'Delete a whole entry (every line of it) from Firefly III, and return the lines, amounts, dates and external ids it removed. Refused for an entry the bank import brought in during the last 8 days, because the nightly import looks back 7 days and would re-create it. Use get_transaction to confirm the entry before deleting.',
       inputSchema: {
         id: z.string().describe(groupIdField('deletes')),
       },
