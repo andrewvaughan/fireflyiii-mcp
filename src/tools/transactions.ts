@@ -84,6 +84,12 @@ export async function fetchTransaction(client: FireflyClient, id: string): Promi
   return unwrapSingle(response);
 }
 
+/**
+ * Household fork: every create asks Firefly to refuse an exact duplicate (`error_if_duplicate_hash`). A create can
+ * time out after Firefly has saved it, and an agent that retries would otherwise enter the same money twice.
+ */
+const DUPLICATE_GUARD = { error_if_duplicate_hash: true } as const;
+
 export async function createTransaction(
   client: FireflyClient,
   params: {
@@ -116,6 +122,7 @@ export async function createTransaction(
   const response = await client.post<JsonApiSingleResponse>('/transactions', {
     apply_rules: APPLY_RULES,
     fire_webhooks: true,
+    ...DUPLICATE_GUARD,
     transactions: [split],
   });
   return unwrapSingle(response);
@@ -332,7 +339,12 @@ export async function createSplitTransaction(
     if (split.notes !== undefined) item.notes = split.notes;
     return item;
   });
-  const body: Record<string, unknown> = { apply_rules: APPLY_RULES, fire_webhooks: true, transactions };
+  const body: Record<string, unknown> = {
+    apply_rules: APPLY_RULES,
+    fire_webhooks: true,
+    ...DUPLICATE_GUARD,
+    transactions,
+  };
   if (params.group_title !== undefined) body.group_title = params.group_title;
   const response = await client.post<JsonApiSingleResponse>('/transactions', body);
   return unwrapSingle(response);

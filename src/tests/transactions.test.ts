@@ -146,6 +146,7 @@ describe('createTransaction', () => {
     expect(mockClient.post).toHaveBeenCalledWith('/transactions', {
       apply_rules: false,
       fire_webhooks: true,
+      error_if_duplicate_hash: true,
       transactions: [
         expect.objectContaining({
           type: 'withdrawal',
@@ -429,6 +430,7 @@ describe('createSplitTransaction', () => {
     expect(mockClient.post).toHaveBeenCalledWith('/transactions', {
       apply_rules: false,
       fire_webhooks: true,
+      error_if_duplicate_hash: true,
       transactions: [
         {
           type: 'withdrawal',
