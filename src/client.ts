@@ -68,9 +68,19 @@ export function formatError(err: unknown): string {
   return 'An unknown error occurred.';
 }
 
+/**
+ * Household fork: the request timeout comes from FIREFLY_REQUEST_TIMEOUT_MS (default 30 s). With running balances on,
+ * Firefly recalculates every later entry on the account when an old entry is written, which took 30 to 33 s for a
+ * 2023 entry on 2026-10-18, so the 30 s default reported a timeout for writes Firefly then saved.
+ */
+export function requestTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number(env.FIREFLY_REQUEST_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? value : 30_000;
+}
+
 export class FireflyClient {
   private readonly baseUrl: string;
-  private readonly timeoutMs = 30_000;
+  private readonly timeoutMs = requestTimeoutMs();
 
   constructor(
     baseUrl: string,

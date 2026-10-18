@@ -1,5 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FireflyClient, FireflyError, formatError, parseContentDispositionFilename } from '../client.js';
+import {
+  FireflyClient,
+  FireflyError,
+  formatError,
+  parseContentDispositionFilename,
+  requestTimeoutMs,
+} from '../client.js';
+
+describe('requestTimeoutMs (household fork)', () => {
+  it('defaults to 30 seconds', () => {
+    expect(requestTimeoutMs({})).toBe(30_000);
+  });
+  it('takes FIREFLY_REQUEST_TIMEOUT_MS when it is a positive number', () => {
+    expect(requestTimeoutMs({ FIREFLY_REQUEST_TIMEOUT_MS: '240000' })).toBe(240_000);
+  });
+  it('ignores a value that is not a positive number', () => {
+    expect(requestTimeoutMs({ FIREFLY_REQUEST_TIMEOUT_MS: 'soon' })).toBe(30_000);
+    expect(requestTimeoutMs({ FIREFLY_REQUEST_TIMEOUT_MS: '0' })).toBe(30_000);
+  });
+});
 
 describe('FireflyClient', () => {
   beforeEach(() => {
