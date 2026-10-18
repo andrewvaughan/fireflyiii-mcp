@@ -310,16 +310,35 @@ describe('updateTransaction (household fork)', () => {
     });
   });
 
-  it('refuses a new amount but accepts the current one', async () => {
-    mockClient.get = vi.fn().mockResolvedValueOnce(oneLine);
-    mockClient.put = vi.fn();
-    await expect(updateTransaction(mockClient, '5', { amount: '50.00' })).rejects.toThrow(/Amounts come from the bank/);
-    expect(mockClient.put).not.toHaveBeenCalled();
-
+  it('changes the amount', async () => {
     mockClient.get = vi.fn().mockResolvedValueOnce(oneLine);
     mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
-    await updateTransaction(mockClient, '5', { amount: '42.50', notes: 'same amount' });
-    expect(mockClient.put).toHaveBeenCalledOnce();
+    await updateTransaction(mockClient, '5', { amount: '22.35' });
+    expect(mockClient.put).toHaveBeenCalledWith('/transactions/5', {
+      apply_rules: false,
+      fire_webhooks: true,
+      transactions: [{ transaction_journal_id: '51', amount: '22.35' }],
+    });
+  });
+
+  it("keeps the line's Source tag when a tag list leaves it out, and not when it names its own", async () => {
+    const tagged = groupFixture([
+      { ...oneLine.data.attributes.transactions[0], tags: ['Source: SimpleFIN Import on 2026-10-05', 'Needs review'] },
+    ]);
+    mockClient.get = vi.fn().mockResolvedValueOnce(tagged);
+    mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await updateTransaction(mockClient, '5', { tags: ['For Lily'] });
+    expect((mockClient.put as ReturnType<typeof vi.fn>).mock.calls[0][1].transactions[0].tags).toEqual([
+      'For Lily',
+      'Source: SimpleFIN Import on 2026-10-05',
+    ]);
+
+    mockClient.get = vi.fn().mockResolvedValueOnce(tagged);
+    mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await updateTransaction(mockClient, '5', { tags: ['Source: Statement'] });
+    expect((mockClient.put as ReturnType<typeof vi.fn>).mock.calls[0][1].transactions[0].tags).toEqual([
+      'Source: Statement',
+    ]);
   });
 });
 
@@ -361,6 +380,35 @@ describe('splitTransaction (household fork)', () => {
         },
       ],
     });
+  });
+
+  it("gives a new line the first line's tags and book date, and keeps the Source tag on a line given its own tags", async () => {
+    const imported = groupFixture([
+      {
+        ...oneLine.data.attributes.transactions[0],
+        book_date: '2024-04-02T00:00:00-04:00',
+        tags: ['Source: SimpleFIN Import on 2024-04-03', 'Needs review'],
+      },
+    ]);
+    mockClient.get = vi.fn().mockResolvedValueOnce(imported);
+    mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await splitTransaction(mockClient, '5', {
+      lines: [
+        { amount: '30.00', description: 'Batteries' },
+        { amount: '10.00', description: 'Mascara', tags: ['For Melissa'] },
+        { amount: '2.50', description: 'Gum' },
+      ],
+    });
+    const legs = (mockClient.put as ReturnType<typeof vi.fn>).mock.calls[0][1].transactions as Array<
+      Record<string, unknown>
+    >;
+    // The reused line sends no tags, so Firefly keeps its own.
+    expect(legs[0]).not.toHaveProperty('tags');
+    expect(legs[0]).not.toHaveProperty('book_date');
+    expect(legs[1].tags).toEqual(['For Melissa', 'Source: SimpleFIN Import on 2024-04-03']);
+    expect(legs[1].book_date).toBe('2024-04-02T00:00:00-04:00');
+    expect(legs[2].tags).toEqual(['Source: SimpleFIN Import on 2024-04-03', 'Needs review']);
+    expect(legs[2].book_date).toBe('2024-04-02T00:00:00-04:00');
   });
 
   it('refuses lines that do not add up to the charge', async () => {
@@ -577,26 +625,133 @@ describe('createSplitTransaction', () => {
   });
 });
 
-describe('bulkUpdateTransactions', () => {
-  it('sends query as a JSON-encoded URL query param per the OpenAPI spec', async () => {
-    mockClient.post = vi.fn().mockResolvedValueOnce(undefined);
-    await bulkUpdateTransactions(mockClient, { query: 'description:coffee', category_name: 'Food', budget_id: '3' });
-    expect(mockClient.post).toHaveBeenCalledWith('/data/bulk/transactions', undefined, {
-      query: JSON.stringify({ where: 'description:coffee', update: { category_name: 'Food', budget_id: '3' } }),
+describe('bulkUpdateTransactions (household fork)', () => {
+  const coffee = (id: string, journal: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    type: 'transactions',
+    attributes: {
+      group_title: null,
+      transactions: [
+        {
+          transaction_journal_id: journal,
+          type: 'withdrawal',
+          date: '2026-10-01T00:00:00-04:00',
+          amount: '4.50',
+          description: 'COFFEE',
+          category_name: null,
+          tags: ['Source: SimpleFIN Import on 2026-10-02', 'Needs review'],
+          ...extra,
+        },
+      ],
+    },
+  });
+  const search = (groups: unknown[]) => ({ data: groups, meta: { pagination: { total_pages: 1 } } });
+
+  it('finds lines by search and edits each entry, adding and removing tags without replacing the rest', async () => {
+    const one = coffee('7', '71');
+    mockClient.get = vi
+      .fn()
+      .mockResolvedValueOnce(search([one]))
+      .mockResolvedValueOnce({ data: one });
+    mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    mockClient.post = vi.fn();
+    const result = (await bulkUpdateTransactions(mockClient, {
+      query: 'description:coffee',
+      category_name: 'Food: Coffee',
+      add_tags: ['For Andrew'],
+      remove_tags: ['Needs review'],
+    })) as Record<string, unknown>;
+    expect(mockClient.get).toHaveBeenNthCalledWith(1, '/search/transactions', {
+      query: 'description:coffee',
+      page: 1,
+      limit: 100,
+    });
+    expect(mockClient.post).not.toHaveBeenCalled();
+    expect(mockClient.put).toHaveBeenCalledWith('/transactions/7', {
+      apply_rules: false,
+      fire_webhooks: true,
+      transactions: [
+        {
+          transaction_journal_id: '71',
+          category_name: 'Food: Coffee',
+          tags: ['Source: SimpleFIN Import on 2026-10-02', 'For Andrew'],
+        },
+      ],
+    });
+    expect(result).toMatchObject({ dry_run: false, matched_entries: 1, changed_entries: 1, remaining_entries: 0 });
+  });
+
+  it('writes nothing on a dry run and lists before and after', async () => {
+    const one = coffee('7', '71');
+    mockClient.get = vi
+      .fn()
+      .mockResolvedValueOnce(search([one]))
+      .mockResolvedValueOnce({ data: one });
+    mockClient.put = vi.fn();
+    const result = (await bulkUpdateTransactions(mockClient, {
+      query: 'description:coffee',
+      category_name: 'Food: Coffee',
+      dry_run: true,
+    })) as { lines: Array<Record<string, unknown>> };
+    expect(mockClient.put).not.toHaveBeenCalled();
+    expect(result.lines[0]).toMatchObject({
+      id: '7',
+      transaction_journal_id: '71',
+      before: { category_name: null },
+      after: { category_name: 'Food: Coffee' },
     });
   });
 
-  it('omits undefined update fields from the JSON query', async () => {
-    mockClient.post = vi.fn().mockResolvedValueOnce(undefined);
-    await bulkUpdateTransactions(mockClient, { query: 'description:groceries' });
-    const call = (mockClient.post as ReturnType<typeof vi.fn>).mock.calls[0] as [
-      string,
-      unknown,
-      Record<string, string>,
-    ];
-    const sentQuery = JSON.parse(call[2].query) as { where: string; update: Record<string, unknown> };
-    expect(sentQuery.where).toBe('description:groceries');
-    expect(Object.keys(sentQuery.update)).toHaveLength(0);
+  it('skips lines already changed and stops at max_entries, counting what remains', async () => {
+    const done = coffee('7', '71', { category_name: 'Food: Coffee' });
+    const todo1 = coffee('8', '81');
+    const todo2 = coffee('9', '91');
+    mockClient.get = vi
+      .fn()
+      .mockResolvedValueOnce(search([done, todo1, todo2]))
+      .mockResolvedValueOnce({ data: done })
+      .mockResolvedValueOnce({ data: todo1 })
+      .mockResolvedValueOnce({ data: todo2 });
+    mockClient.put = vi.fn().mockResolvedValue(writeSingleFixture);
+    const result = (await bulkUpdateTransactions(mockClient, {
+      query: 'description:coffee',
+      category_name: 'Food: Coffee',
+      max_entries: 1,
+    })) as Record<string, unknown>;
+    expect(mockClient.put).toHaveBeenCalledOnce();
+    expect(mockClient.put).toHaveBeenCalledWith('/transactions/8', expect.anything());
+    expect(result).toMatchObject({ matched_entries: 3, changed_entries: 1, remaining_entries: 1 });
+  });
+
+  it('sends the other lines of a split back by id', async () => {
+    const split = {
+      id: '5',
+      type: 'transactions',
+      attributes: { group_title: 'Amazon order', transactions: threeLines.data.attributes.transactions },
+    };
+    const found = { ...split, attributes: { ...split.attributes, transactions: [split.attributes.transactions[1]] } };
+    mockClient.get = vi
+      .fn()
+      .mockResolvedValueOnce(search([found]))
+      .mockResolvedValueOnce(threeLines);
+    mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await bulkUpdateTransactions(mockClient, { query: 'description:mascara', category_name: 'Personal Care: Makeup' });
+    expect(mockClient.put).toHaveBeenCalledWith('/transactions/5', {
+      apply_rules: false,
+      fire_webhooks: true,
+      group_title: 'Amazon order',
+      transactions: [
+        { transaction_journal_id: '61' },
+        { transaction_journal_id: '62', category_name: 'Personal Care: Makeup' },
+        { transaction_journal_id: '63' },
+      ],
+    });
+  });
+
+  it('refuses a call that changes nothing', async () => {
+    await expect(bulkUpdateTransactions(mockClient, { query: 'description:coffee' })).rejects.toThrow(
+      /Nothing to change/,
+    );
   });
 });
 

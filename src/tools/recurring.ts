@@ -75,7 +75,8 @@ export async function createRecurrence(
     title: params.title,
     first_date: params.first_date,
     repeat_until: params.repeat_until ?? null,
-    apply_rules: params.apply_rules ?? true,
+    // Household fork: like every other agent write, generated entries skip Firefly's rules unless asked.
+    apply_rules: params.apply_rules ?? false,
     active: params.active ?? true,
     repetitions: [repetition],
     transactions: [transaction],
@@ -248,7 +249,11 @@ export function registerRecurringTools(server: McpServer, client: FireflyClient)
           .positive()
           .optional()
           .describe('Stop after N occurrences. Do not combine with repeat_until.'),
-        apply_rules: z.boolean().optional().default(true).describe('Apply rules to generated transactions'),
+        apply_rules: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe('Run Firefly rules on each generated transaction (default false, like every agent write)'),
         active: z.boolean().optional().default(true).describe('Whether the recurrence is active'),
         repeat_type: z.enum(['daily', 'weekly', 'monthly', 'ndom', 'yearly']).describe('Repetition frequency'),
         repeat_moment: z

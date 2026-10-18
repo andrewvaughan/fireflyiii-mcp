@@ -86,7 +86,7 @@ const writeSingleFixture = {
 };
 
 describe('createRecurrence', () => {
-  it('posts to /recurrences with correct body structure', async () => {
+  it('posts to /recurrences with correct body structure, running no rules unless asked (household fork)', async () => {
     mockClient.post = vi.fn().mockResolvedValueOnce(writeSingleFixture);
     await createRecurrence(mockClient, {
       type: 'withdrawal',
@@ -105,7 +105,7 @@ describe('createRecurrence', () => {
       title: 'Monthly rent',
       first_date: '2026-06-01',
       repeat_until: null,
-      apply_rules: true,
+      apply_rules: false,
       active: true,
       repetitions: [{ type: 'monthly', moment: '1', weekend: 4 }],
       transactions: [{ description: 'Rent', amount: '950.00', source_id: '1', destination_id: '5' }],

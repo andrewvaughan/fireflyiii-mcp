@@ -36,6 +36,23 @@ function cents(amount: unknown): number {
   return Math.round(Number(amount) * 100);
 }
 
+/**
+ * Household fork: every entry in these books keeps a "Source: " tag saying where it came from (the bank import, a
+ * statement, Quicken). A tag list sent without one would drop it, as an earlier split script did on five lines, so
+ * the line's own Source tags are kept unless the list names a Source tag of its own.
+ */
+export const SOURCE_TAG_PREFIX = 'Source: ';
+
+function tagList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+export function keepSourceTags(sent: string[], current: unknown): string[] {
+  if (sent.some((tag) => tag.startsWith(SOURCE_TAG_PREFIX))) return sent;
+  const kept = tagList(current).filter((tag) => tag.startsWith(SOURCE_TAG_PREFIX) && !sent.includes(tag));
+  return [...sent, ...kept];
+}
+
 async function fetchJournals(
   client: FireflyClient,
   id: string,
@@ -142,7 +159,7 @@ export async function createTransaction(
  * Household fork: Firefly deletes every line of an entry that a PUT leaves out, and upstream sent a single line with
  * no `transaction_journal_id`, so editing a split entry deleted its other lines. This version reads the entry first,
  * edits one named line (required when there are several), and sends every other line back by its id, unchanged.
- * It also refuses a new amount: amounts come from the bank, and `split_transaction` divides a charge across lines.
+ * A tag list without a Source tag keeps the line's Source tags (`keepSourceTags`).
  */
 export async function updateTransaction(
   client: FireflyClient,
@@ -177,11 +194,6 @@ export async function updateTransaction(
     throw new Error(`Line ${lineId} is not part of transaction ${id}; its lines are ${lineIds.join(', ')}.`);
   }
   const target = journals[lineIds.indexOf(String(lineId))];
-  if (params.amount !== undefined && cents(params.amount) !== cents(target.amount)) {
-    throw new Error(
-      `Amounts come from the bank and are not changed here (line ${lineId} is ${Number(target.amount).toFixed(2)}). To divide a charge across lines, use split_transaction.`,
-    );
-  }
   const split: Record<string, unknown> = { transaction_journal_id: String(lineId) };
   if (params.type !== undefined) split.type = params.type;
   if (params.date !== undefined) split.date = params.date;
@@ -194,7 +206,7 @@ export async function updateTransaction(
   if (params.budget_id !== undefined) split.budget_id = params.budget_id;
   if (params.currency_code !== undefined) split.currency_code = params.currency_code;
   if (params.notes !== undefined) split.notes = params.notes;
-  if (params.tags !== undefined) split.tags = params.tags;
+  if (params.tags !== undefined) split.tags = keepSourceTags(params.tags, target.tags);
   const others = lineIds
     .filter((other) => other !== String(lineId))
     .map((other) => ({ transaction_journal_id: other }));
@@ -213,7 +225,9 @@ export async function updateTransaction(
  * Household fork: divides an existing charge into item lines (a receipt with items in different categories) without
  * creating a transaction. The lines must add up to the charge to the cent. Existing lines are reused, a line of the
  * same amount first and then in order, so their ids, external ids and attachments stay; a line left over is removed,
- * which is refused when it has an attachment. Accounts, type and date come from the existing lines.
+ * which is refused when it has an attachment. Accounts, type and date come from the existing lines. A new line takes
+ * the tags and book date of the line it was split from (the entry's first line), so the Source tag and the bank's
+ * posting day carry over; a line given its own tags keeps the Source tags all the same (`keepSourceTags`).
  */
 export async function splitTransaction(
   client: FireflyClient,
@@ -273,10 +287,15 @@ export async function splitTransaction(
       source_id: base.source_id ?? first.source_id,
       destination_id: base.destination_id ?? first.destination_id,
     };
-    if (claimed.has(index)) leg.transaction_journal_id = String((claimed.get(index) as Journal).transaction_journal_id);
+    if (claimed.has(index)) {
+      leg.transaction_journal_id = String((claimed.get(index) as Journal).transaction_journal_id);
+    } else if (base.book_date) {
+      leg.book_date = base.book_date;
+    }
     if (line.category_name !== undefined) leg.category_name = line.category_name;
     if (line.budget_id !== undefined) leg.budget_id = line.budget_id;
-    if (line.tags !== undefined) leg.tags = line.tags;
+    if (line.tags !== undefined) leg.tags = keepSourceTags(line.tags, base.tags);
+    else if (!claimed.has(index)) leg.tags = tagList(base.tags);
     if (line.notes !== undefined) leg.notes = line.notes;
     return leg;
   });
@@ -336,18 +355,116 @@ export async function searchTransactions(
   return unwrapList(response);
 }
 
-export async function bulkUpdateTransactions(
-  client: FireflyClient,
-  params: { query: string; category_name?: string; budget_id?: string; tags?: string[]; notes?: string },
-): Promise<unknown> {
-  const update: Record<string, unknown> = {};
-  if (params.category_name !== undefined) update.category_name = params.category_name;
-  if (params.budget_id !== undefined) update.budget_id = params.budget_id;
-  if (params.tags !== undefined) update.tags = params.tags;
-  if (params.notes !== undefined) update.notes = params.notes;
-  return client.post('/data/bulk/transactions', undefined, {
-    query: JSON.stringify({ where: params.query, update }),
-  });
+/**
+ * Household fork: Firefly's bulk endpoint (`/data/bulk/transactions`) only moves every entry from one account to
+ * another, and refused upstream's search query outright, so this tool never changed anything. It now finds the lines
+ * with Firefly's search and edits each entry through the same path as `update_transaction`, sending every other line
+ * back by id. Tags are added and removed rather than replaced, so no line loses a tag nobody named. A line that would
+ * not change is skipped, so a run cut short by `max_entries` resumes where it stopped when called again with the
+ * same query. `dry_run` lists what would change and writes nothing.
+ */
+export const BULK_DEFAULT_MAX_ENTRIES = 25;
+
+type BulkParams = {
+  query: string;
+  category_name?: string;
+  budget_id?: string;
+  add_tags?: string[];
+  remove_tags?: string[];
+  notes?: string;
+  dry_run?: boolean;
+  max_entries?: number;
+};
+
+export async function bulkUpdateTransactions(client: FireflyClient, params: BulkParams): Promise<unknown> {
+  if (
+    params.category_name === undefined &&
+    params.budget_id === undefined &&
+    params.notes === undefined &&
+    !params.add_tags?.length &&
+    !params.remove_tags?.length
+  ) {
+    throw new Error('Nothing to change: give category_name, budget_id, notes, add_tags or remove_tags.');
+  }
+  const add = params.add_tags ?? [];
+  const remove = new Set(params.remove_tags ?? []);
+  const matched = new Map<string, Set<string>>();
+  for (let page = 1; ; page++) {
+    const response = await client.get<JsonApiListResponse>('/search/transactions', {
+      query: params.query,
+      page,
+      limit: 100,
+    });
+    for (const group of response?.data ?? []) {
+      const lines = ((group.attributes as Record<string, unknown>)?.transactions ?? []) as Journal[];
+      const ids = matched.get(String(group.id)) ?? new Set<string>();
+      for (const line of lines) ids.add(String(line.transaction_journal_id));
+      matched.set(String(group.id), ids);
+    }
+    const meta = response?.meta as { pagination?: { total_pages?: number } } | undefined;
+    const pages = Number(meta?.pagination?.total_pages ?? 1);
+    if (page >= pages) break;
+  }
+  const max = params.max_entries ?? BULK_DEFAULT_MAX_ENTRIES;
+  const changes: Array<Record<string, unknown>> = [];
+  let entries = 0;
+  let remaining = 0;
+  for (const [groupId, lineIds] of matched) {
+    const { groupTitle, journals } = await fetchJournals(client, groupId);
+    const legs: Array<Record<string, unknown>> = [];
+    const changed: Array<Record<string, unknown>> = [];
+    for (const journal of journals) {
+      const id = String(journal.transaction_journal_id);
+      const leg: Record<string, unknown> = { transaction_journal_id: id };
+      if (lineIds.has(id)) {
+        const before: Record<string, unknown> = {};
+        const after: Record<string, unknown> = {};
+        const set = (field: string, current: unknown, next: unknown) => {
+          if (next === undefined || JSON.stringify(current ?? null) === JSON.stringify(next)) return;
+          before[field] = current ?? null;
+          after[field] = next;
+          leg[field] = next;
+        };
+        set('category_name', journal.category_name, params.category_name);
+        set('budget_id', journal.budget_id == null ? null : String(journal.budget_id), params.budget_id);
+        set('notes', journal.notes, params.notes);
+        const tags = tagList(journal.tags);
+        const nextTags = [...tags.filter((tag) => !remove.has(tag)), ...add.filter((tag) => !tags.includes(tag))];
+        if (JSON.stringify(nextTags) !== JSON.stringify(tags)) set('tags', tags, nextTags);
+        if (Object.keys(after).length > 0) {
+          changed.push({
+            id: groupId,
+            transaction_journal_id: id,
+            date: String(journal.date ?? '').slice(0, 10),
+            amount: Number(journal.amount).toFixed(2),
+            description: journal.description,
+            before,
+            after,
+          });
+        }
+      }
+      legs.push(leg);
+    }
+    if (changed.length === 0) continue;
+    if (entries >= max) {
+      remaining++;
+      continue;
+    }
+    entries++;
+    if (!params.dry_run) {
+      const body: Record<string, unknown> = { apply_rules: APPLY_RULES, fire_webhooks: true, transactions: legs };
+      if (journals.length > 1) body.group_title = groupTitle ?? String(journals[0].description ?? '');
+      await client.put<JsonApiSingleResponse>(`/transactions/${groupId}`, body);
+    }
+    changes.push(...changed);
+  }
+  return {
+    dry_run: Boolean(params.dry_run),
+    matched_entries: matched.size,
+    changed_entries: entries,
+    remaining_entries: remaining,
+    lines: changes,
+  };
 }
 
 export async function createSplitTransaction(
@@ -478,7 +595,7 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
     {
       title: 'Update Transaction',
       description:
-        "Update one line of an existing transaction in Firefly III. Only fields provided will be changed, and every other line of the entry is kept. An entry with several lines (a split) needs transaction_journal_id to name the line; get_transaction lists them. Amounts cannot be changed (they come from the bank): use split_transaction to divide a charge across lines. Tags replace the line's tag list, so send every tag it should keep. Firefly rules are not run. Use get_transaction to confirm the ID before updating.",
+        'Update one line of an existing transaction in Firefly III. Only fields provided will be changed, and every other line of the entry is kept. An entry with several lines (a split) needs transaction_journal_id to name the line; get_transaction lists them. The amount can be changed; to divide a charge across lines, use split_transaction. Tags replace the line\'s tag list, so send every tag it should keep, except that its "Source: " tag is kept unless you send a Source tag of your own. Firefly rules are not run. Use get_transaction to confirm the ID before updating.',
       inputSchema: {
         id: z.string().describe(groupIdField('updates')),
         transaction_journal_id: z
@@ -492,10 +609,7 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
           .optional()
           .describe('Transaction date (YYYY-MM-DD or RFC 3339 date-time with timezone)'),
         book_date: dateOrDateTimeSchema.optional().describe(BOOK_DATE_HINT),
-        amount: z
-          .string()
-          .optional()
-          .describe("Only accepted when it equals the line's current amount; amounts come from the bank"),
+        amount: z.string().optional().describe('New amount for this line as a positive number string, e.g. "42.50"'),
         description: z.string().optional().describe('Short description'),
         source_id: z.string().optional().describe('Source account ID'),
         destination_id: z.string().optional().describe('Destination account ID'),
@@ -516,7 +630,7 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
     {
       title: 'Split Transaction',
       description:
-        "Divide an existing transaction into item lines, such as a receipt with items in different categories, without creating a new transaction. The lines must add up to the entry's total to the cent. Existing lines are reused (one of the same amount first, then in order), so their ids and attachments stay; a leftover line is removed, which is refused when it holds an attachment. Accounts, type and date are kept. Firefly rules are not run. Use get_transaction first.",
+        "Divide an existing transaction into item lines, such as a receipt with items in different categories, without creating a new transaction. The lines must add up to the entry's total to the cent (change the total first with update_transaction's amount if it should differ). Existing lines are reused (one of the same amount first, then in order), so their ids, tags and attachments stay; a new line takes the tags and book date of the entry's first line; a line given its own tags keeps its \"Source: \" tag unless you send one. A leftover line is removed, which is refused when it holds an attachment. Accounts, type and date are kept; change a line's accounts afterwards with update_transaction. Firefly rules are not run. Use get_transaction first.",
       inputSchema: {
         id: z.string().describe(groupIdField('splits')),
         group_title: z
@@ -530,7 +644,12 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
               description: z.string().describe('What this line bought'),
               category_name: z.string().optional().describe(`Category name. ${CATEGORY_NAME_HINT}`),
               budget_id: z.string().optional().describe('Budget ID'),
-              tags: z.array(z.string()).optional().describe('Tags for this line (replaces its tags)'),
+              tags: z
+                .array(z.string())
+                .optional()
+                .describe(
+                  "Tags for this line (replaces its tags; its Source tag is kept). Omit to keep the line's tags, or for a new line the first line's",
+                ),
               notes: z.string().optional().describe('Notes for this line (replaces its notes)'),
             }),
           )
@@ -620,7 +739,7 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
     {
       title: 'Bulk Update Transactions',
       description:
-        'Update multiple transactions at once using a search query (same syntax as search_transactions). All matching transactions will have the specified fields updated.',
+        "Change many transactions at once: every line Firefly's search finds for the query (same syntax as search_transactions) gets the fields given, and every other line of each entry is kept. Tags are added and removed, never replaced. Run with dry_run first to list exactly what would change. Each entry takes 1 to 30 seconds to save (older ones longer), so one call changes at most max_entries entries (default 25) and reports remaining_entries; call again with the same query to continue, since lines already changed are skipped. Firefly rules are not run.",
       inputSchema: {
         query: z.string().describe('Search query to select transactions (same syntax as search_transactions)'),
         category_name: z
@@ -628,8 +747,20 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
           .optional()
           .describe(`Set category for all matched transactions. ${CATEGORY_NAME_HINT}`),
         budget_id: z.string().optional().describe('Set budget for all matched transactions'),
-        tags: z.array(z.string()).optional().describe('Replace tags on all matched transactions'),
-        notes: z.string().optional().describe('Set notes on all matched transactions'),
+        add_tags: z.array(z.string()).optional().describe('Tags to add to every matched line'),
+        remove_tags: z.array(z.string()).optional().describe('Tags to remove from every matched line'),
+        notes: z.string().optional().describe('Replace the notes on all matched lines'),
+        dry_run: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe('List the lines that would change, with before and after, and write nothing'),
+        max_entries: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(`Most entries to change in this call (default ${BULK_DEFAULT_MAX_ENTRIES})`),
       },
       annotations: WRITE_ANNOTATIONS,
     },
