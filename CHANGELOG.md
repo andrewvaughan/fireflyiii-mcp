@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Bumped transitive `hono` from 4.13.7 to 4.13.13**, resolving [GHSA-5r4p-p66f-jhc7](https://github.com/advisories/GHSA-5r4p-p66f-jhc7) (moderate severity), where `serveStatic` decodes the request path a second time and middleware on static paths can be bypassed. It comes in through `@modelcontextprotocol/sdk`, which uses only `@hono/node-server`'s request listener for its Streamable HTTP transport; neither this server nor the SDK calls `serveStatic`, so it was not exploitable here.
+
 ## [0.5.4] - 2026-10-20
 
 ### Security
