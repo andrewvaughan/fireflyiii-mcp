@@ -12,7 +12,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that c
 
 ## What this fork changes
 
-This is Andrew Vaughan's fork of [daften/fireflyiii-mcp](https://github.com/daften/fireflyiii-mcp), used by a household AI agent that keeps the family's Firefly III books. It is built from source and nothing here is published to npm. The `household` branch is upstream release v0.5.3 (commit `eb8b6ca`) plus the household commits, and every change is marked "Household fork" in the source.
+This is Andrew Vaughan's fork of [daften/fireflyiii-mcp](https://github.com/daften/fireflyiii-mcp), used by a household AI agent that keeps the family's Firefly III books. It is built from source and nothing here is published to npm. The `household` branch is upstream release v0.5.5 (commit `4316a86`) plus the household commits, and every change is marked "Household fork" in the source. It was rebased from v0.5.3 on 2026-10-22, when upstream's two releases changed only dependencies (v0.5.5 moves the transitive `hono` to 4.13.13 for GHSA-5r4p-p66f-jhc7); the v0.5.3 build is kept as the tag `household-v0.5.3`.
 
 | Change | Why | Files |
 |---|---|---|
@@ -35,7 +35,7 @@ Tests: `src/tests/transactions.test.ts` (the "household fork" suites), `src/test
 
 ### Rebasing onto a new upstream release
 
-1. Fetch upstream and read its changelog, then its diff from `eb8b6ca` for `src/tools/transactions.ts`, `src/tools/attachments.ts` and the tests above.
+1. Fetch upstream and read its changelog, then its diff from `4316a86` (v0.5.5) for `src/tools/transactions.ts`, `src/tools/attachments.ts` and the tests above.
 2. Drop any change upstream now covers: check whether `update_transaction` sends `transaction_journal_id` and keeps other lines, whether writes still send `apply_rules: true`, whether creates send `error_if_duplicate_hash`, whether a tool divides an existing entry, whether `upload_attachment` takes a file path, and whether `bulk_update_transactions` works against Firefly's bulk endpoint and keeps tags.
 3. Rebase the `household` branch onto the release, resolve conflicts, then run `npm ci` and `npm run check`. Update the tool counts if upstream added tools.
 4. Review the new commit, then point the deployment at it.
