@@ -159,6 +159,26 @@ describe('createTransaction', () => {
     });
   });
 
+  it('passes a reconciliation through with both accounts', async () => {
+    mockClient.post = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await createTransaction(mockClient, {
+      type: 'reconciliation',
+      date: '2026-10-31',
+      amount: '1883.00',
+      description: 'Market value change',
+      source_id: '1042',
+      destination_id: '173',
+    });
+    expect(mockClient.post).toHaveBeenCalledWith(
+      '/transactions',
+      expect.objectContaining({
+        transactions: [
+          expect.objectContaining({ type: 'reconciliation', source_id: '1042', destination_id: '173', amount: '1883.00' }),
+        ],
+      }),
+    );
+  });
+
   it('returns unwrapped single', async () => {
     mockClient.post = vi.fn().mockResolvedValueOnce(writeSingleFixture);
     const result = await createTransaction(mockClient, {

@@ -123,10 +123,16 @@ export const BOOK_DATE_HINT =
 export const EXTERNAL_URL_HINT =
   "Link to this line's source document (the family puts its Paperless document's address here, https://docs.lab.andrewvaughan.io/documents/<id>/details). Shown in Firefly as External URL.";
 
+// The household books an asset's change in market value (the house, the cars) as a reconciliation, so it moves net
+// worth without a payee and stays out of income and spending (2026-10-31). Firefly's API can only use a reconciliation
+// account that its Reconcile screen has already made for that asset.
+export const RECONCILIATION_HINT =
+  'A reconciliation sets an asset account\'s value without a payee, and counts as neither income nor spending. For an increase, source_id is the asset\'s reconciliation account ("<asset name> reconciliation (USD)", found with search_accounts) and destination_id the asset; for a decrease, the other way round. Firefly refuses one for an asset whose reconciliation account does not exist yet; that account is made once in Firefly\'s Reconcile screen.';
+
 export async function createTransaction(
   client: FireflyClient,
   params: {
-    type: 'withdrawal' | 'deposit' | 'transfer';
+    type: 'withdrawal' | 'deposit' | 'transfer' | 'reconciliation';
     date: string;
     book_date?: string;
     amount: string;
@@ -585,9 +591,9 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
     'create_transaction',
     {
       title: 'Create Transaction',
-      description: `Create a new transaction in Firefly III. Use get_accounts to find source and destination account IDs. ${GROUP_ID_HINT}`,
+      description: `Create a new transaction in Firefly III. Use get_accounts to find source and destination account IDs. ${GROUP_ID_HINT} ${RECONCILIATION_HINT}`,
       inputSchema: {
-        type: z.enum(['withdrawal', 'deposit', 'transfer']).describe('Transaction type'),
+        type: z.enum(['withdrawal', 'deposit', 'transfer', 'reconciliation']).describe('Transaction type'),
         date: dateOrDateTimeSchema.describe('Transaction date (YYYY-MM-DD or RFC 3339 date-time with timezone)'),
         book_date: dateOrDateTimeSchema.optional().describe(BOOK_DATE_HINT),
         amount: z.string().describe('Amount as a positive number string, e.g. "42.50"'),
