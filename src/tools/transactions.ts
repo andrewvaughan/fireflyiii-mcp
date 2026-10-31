@@ -115,6 +115,14 @@ const DUPLICATE_GUARD = { error_if_duplicate_hash: true } as const;
 export const BOOK_DATE_HINT =
   "For a transfer: the day the money reached the receiving account, from that account's statement, when it differs from date (the day it left the paying account).";
 
+/**
+ * Household fork: every line links to its source document in Paperless, the family's master document store, through
+ * Firefly's own `external_url` field (shown as "External URL"), so a line opens its receipt or statement in one click.
+ * Upstream's tools could not set it; create, update and split pass it through.
+ */
+export const EXTERNAL_URL_HINT =
+  "Link to this line's source document (the family puts its Paperless document's address here, https://docs.lab.andrewvaughan.io/documents/<id>/details). Shown in Firefly as External URL.";
+
 export async function createTransaction(
   client: FireflyClient,
   params: {
@@ -130,6 +138,7 @@ export async function createTransaction(
     currency_code?: string;
     notes?: string;
     tags?: string[];
+    external_url?: string;
   },
 ): Promise<UnwrappedSingle> {
   const split: Record<string, unknown> = {
@@ -139,6 +148,7 @@ export async function createTransaction(
     description: params.description,
   };
   if (params.book_date !== undefined) split.book_date = params.book_date;
+  if (params.external_url !== undefined) split.external_url = params.external_url;
   if (params.source_id !== undefined) split.source_id = params.source_id;
   if (params.destination_id !== undefined) split.destination_id = params.destination_id;
   if (params.category_name !== undefined) split.category_name = params.category_name;
@@ -178,6 +188,7 @@ export async function updateTransaction(
     currency_code?: string;
     notes?: string;
     tags?: string[];
+    external_url?: string;
   },
 ): Promise<UnwrappedSingle> {
   const { groupTitle, journals } = await fetchJournals(client, id);
@@ -207,6 +218,7 @@ export async function updateTransaction(
   if (params.currency_code !== undefined) split.currency_code = params.currency_code;
   if (params.notes !== undefined) split.notes = params.notes;
   if (params.tags !== undefined) split.tags = keepSourceTags(params.tags, target.tags);
+  if (params.external_url !== undefined) split.external_url = params.external_url;
   const others = lineIds
     .filter((other) => other !== String(lineId))
     .map((other) => ({ transaction_journal_id: other }));
@@ -241,6 +253,7 @@ export async function splitTransaction(
       budget_id?: string;
       tags?: string[];
       notes?: string;
+      external_url?: string;
     }>;
   },
 ): Promise<UnwrappedSingle> {
@@ -297,6 +310,7 @@ export async function splitTransaction(
     if (line.tags !== undefined) leg.tags = keepSourceTags(line.tags, base.tags);
     else if (!claimed.has(index)) leg.tags = tagList(base.tags);
     if (line.notes !== undefined) leg.notes = line.notes;
+    if (line.external_url !== undefined) leg.external_url = line.external_url;
     return leg;
   });
   const body: Record<string, unknown> = { apply_rules: APPLY_RULES, fire_webhooks: true, transactions: legs };
@@ -483,6 +497,7 @@ export async function createSplitTransaction(
       budget_id?: string;
       tags?: string[];
       notes?: string;
+      external_url?: string;
     }>;
   },
 ): Promise<UnwrappedSingle> {
@@ -500,6 +515,7 @@ export async function createSplitTransaction(
     if (split.budget_id !== undefined) item.budget_id = split.budget_id;
     if (split.tags !== undefined) item.tags = split.tags;
     if (split.notes !== undefined) item.notes = split.notes;
+    if (split.external_url !== undefined) item.external_url = split.external_url;
     return item;
   });
   const body: Record<string, unknown> = {
@@ -583,6 +599,7 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
         currency_code: z.string().optional().describe('Currency code (e.g. EUR, USD). Defaults to account currency.'),
         notes: z.string().optional().describe('Additional notes'),
         tags: z.array(z.string()).optional().describe('Tags to attach'),
+        external_url: z.string().url().optional().describe(EXTERNAL_URL_HINT),
       },
       annotations: WRITE_ANNOTATIONS,
     },
@@ -618,6 +635,7 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
         currency_code: z.string().optional().describe('Currency code (e.g. EUR, USD)'),
         notes: z.string().optional().describe('Additional notes'),
         tags: z.array(z.string()).optional().describe('Tags (replaces existing tags)'),
+        external_url: z.string().url().optional().describe(EXTERNAL_URL_HINT),
       },
       annotations: UPDATE_ANNOTATIONS,
     },
@@ -651,6 +669,7 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
                   "Tags for this line (replaces its tags; its Source tag is kept). Omit to keep the line's tags, or for a new line the first line's",
                 ),
               notes: z.string().optional().describe('Notes for this line (replaces its notes)'),
+              external_url: z.string().url().optional().describe(EXTERNAL_URL_HINT),
             }),
           )
           .min(1)
@@ -723,6 +742,7 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
               budget_id: z.string().optional().describe('Budget ID — use get_budgets to find valid IDs'),
               tags: z.array(z.string()).optional().describe('Tags'),
               notes: z.string().optional().describe('Notes'),
+              external_url: z.string().url().optional().describe(EXTERNAL_URL_HINT),
             }),
           )
           .min(2)

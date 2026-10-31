@@ -310,6 +310,42 @@ describe('updateTransaction (household fork)', () => {
     });
   });
 
+  it("sets a line's external URL (its Paperless document) on update, create and split", async () => {
+    const url = 'https://docs.lab.andrewvaughan.io/documents/3001/details';
+    mockClient.get = vi.fn().mockResolvedValueOnce(oneLine);
+    mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await updateTransaction(mockClient, '5', { external_url: url });
+    expect(mockClient.put).toHaveBeenCalledWith('/transactions/5', {
+      apply_rules: false,
+      fire_webhooks: true,
+      transactions: [{ transaction_journal_id: '51', external_url: url }],
+    });
+
+    mockClient.post = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await createTransaction(mockClient, {
+      type: 'withdrawal',
+      date: '2026-10-30',
+      amount: '1.00',
+      description: 'x',
+      external_url: url,
+    });
+    const created = vi.mocked(mockClient.post).mock.calls[0][1] as { transactions: Array<Record<string, unknown>> };
+    expect(created.transactions[0].external_url).toBe(url);
+
+    mockClient.get = vi.fn().mockResolvedValueOnce(oneLine);
+    mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
+    await splitTransaction(mockClient, '5', {
+      lines: [
+        { amount: '40.00', description: 'a', external_url: url },
+        { amount: '2.50', description: 'b' },
+      ],
+    });
+    const legs = (vi.mocked(mockClient.put).mock.calls[0][1] as { transactions: Array<Record<string, unknown>> })
+      .transactions;
+    expect(legs[0].external_url).toBe(url);
+    expect(legs[1]).not.toHaveProperty('external_url');
+  });
+
   it('changes the amount', async () => {
     mockClient.get = vi.fn().mockResolvedValueOnce(oneLine);
     mockClient.put = vi.fn().mockResolvedValueOnce(writeSingleFixture);
