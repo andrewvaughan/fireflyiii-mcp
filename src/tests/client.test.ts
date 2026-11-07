@@ -133,10 +133,14 @@ describe('FireflyClient', () => {
   });
 
   it('post() appends query params to URL when provided', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }));
+    // Household fork: the reconciled lock first reads the rule group's test list (empty here), then the trigger runs.
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [], meta: { pagination: { total_pages: 1 } } })))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const client = new FireflyClient('https://firefly.example.com', 'token');
     await client.post('/rule-groups/1/trigger', undefined, { start: '2026-01-01', end: '2026-12-31' });
-    const calledUrl = vi.mocked(fetch).mock.calls[0][0] as string;
+    expect(vi.mocked(fetch).mock.calls[0][0]).toContain('/rule-groups/1/test?start=2026-01-01&end=2026-12-31');
+    const calledUrl = vi.mocked(fetch).mock.calls[1][0] as string;
     expect(calledUrl).toContain('start=2026-01-01');
     expect(calledUrl).toContain('end=2026-12-31');
   });
@@ -195,7 +199,10 @@ describe('FireflyClient write methods', () => {
 
   it('post() sets Content-Type: application/json and serializes an empty {} body', async () => {
     // Regression: a bodyless trigger POST must still carry Content-Type so Firefly does not 415.
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }));
+    // Household fork: the reconciled lock's read of the rule group's test list comes first.
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [], meta: { pagination: { total_pages: 1 } } })))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const client = new FireflyClient('https://firefly.example.com', 'token');
     await client.post('/rule-groups/1/trigger', {}, { start: '2026-01-01' });
     expect(fetch).toHaveBeenCalledWith(
@@ -256,7 +263,10 @@ describe('FireflyClient write methods', () => {
   });
 
   it('postBinary() sends POST with octet-stream Content-Type and returns undefined on 204', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }));
+    // Household fork: the reconciled lock reads the attachment first (not on a transaction here).
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { attributes: { attachable_type: 'Bill' } } })))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const client = new FireflyClient('https://firefly.example.com', 'token');
     const data = new Uint8Array([1, 2, 3]);
     const result = await client.postBinary('/attachments/1/upload', data);
@@ -272,7 +282,10 @@ describe('FireflyClient write methods', () => {
   });
 
   it('postBinary() throws FireflyError on non-2xx response', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(new Response('Not Found', { status: 404 }));
+    // Household fork: the lock's read of a missing attachment finds nothing to protect; the upload then fails.
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response('Not Found', { status: 404 }))
+      .mockResolvedValueOnce(new Response('Not Found', { status: 404 }));
     const client = new FireflyClient('https://firefly.example.com', 'token');
     await expect(client.postBinary('/attachments/999/upload', new Uint8Array([]))).rejects.toThrow(FireflyError);
   });

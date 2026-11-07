@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { FireflyClient } from '../client.js';
+import { lockBypass, RECONCILED_TAG, STAMP_PREFIX, unlockKeyMatches } from '../reconciled-lock.js';
 import {
   type JsonApiListResponse,
   type JsonApiSingleResponse,
@@ -127,7 +128,7 @@ export const EXTERNAL_URL_HINT =
 // worth without a payee and stays out of income and spending (2026-10-31). Firefly's API can only use a reconciliation
 // account that its Reconcile screen has already made for that asset.
 export const RECONCILIATION_HINT =
-  'A reconciliation sets an asset account\'s value without a payee, and counts as neither income nor spending. For an increase, source_id is the asset\'s reconciliation account ("<asset name> reconciliation (USD)", found with search_accounts) and destination_id the asset; for a decrease, the other way round. Firefly refuses one for an asset whose reconciliation account does not exist yet; that account is made once in Firefly\'s Reconcile screen.';
+  "A reconciliation sets an asset account's value without a payee, and counts as neither income nor spending. For an increase, source_id is the asset's reconciliation account (\"<asset name> reconciliation (USD)\", found with search_accounts) and destination_id the asset; for a decrease, the other way round. Firefly refuses one for an asset whose reconciliation account does not exist yet; that account is made once in Firefly's Reconcile screen.";
 
 export async function createTransaction(
   client: FireflyClient,
@@ -364,6 +365,69 @@ export async function deleteTransaction(
     external_id: journal.external_id ?? null,
   }));
   return { deleted: true, id, title: groupTitle, lines };
+}
+
+/**
+ * Household fork (2026-11-07): the one way to set or clear Firefly's reconciled flag. Every other write to a reconciled
+ * entry is refused by the lock in reconciled-lock.ts. It needs the unlock key the review worker holds
+ * (RECONCILE_UNLOCK_KEY in this server's environment; no agent has it, and the tool is left out of their allow-lists),
+ * and Andrew's ok travels with the card the worker applies.
+ *
+ * Locking (reconciled: true) marks every split of the group, adds the "Reconciled" tag and appends `stamp` (the line
+ * naming the statement, starting "Reconciled:") to each split's notes once. Unlocking (reconciled: false) clears the
+ * flag, removes the tag, turns each "Reconciled:" line into "Was reconciled:" and appends "Unlocked <date>: <reason>",
+ * so the entry can be changed and then reconciled again.
+ */
+export function todayLocal(now: Date = new Date()): string {
+  return now.toLocaleDateString('en-CA', { timeZone: process.env.TZ || 'America/New_York' });
+}
+
+export async function setReconciled(
+  client: FireflyClient,
+  id: string,
+  params: { reconciled: boolean; unlock_key: string; reason: string; stamp?: string },
+  now: Date = new Date(),
+): Promise<UnwrappedSingle> {
+  if (!unlockKeyMatches(params.unlock_key)) {
+    throw new Error(
+      "Refused: set_reconciled needs the review worker's unlock key. Reconciling or unlocking an entry is done only by the review worker, on a card Andrew has okayed.",
+    );
+  }
+  const reason = String(params.reason ?? '').trim();
+  if (!reason) throw new Error("set_reconciled needs a reason (the card and Andrew's ok it carries out).");
+  const stamp = params.stamp?.trim();
+  if (params.reconciled && !stamp?.startsWith(STAMP_PREFIX)) {
+    throw new Error(
+      `set_reconciled needs a stamp starting "${STAMP_PREFIX}" naming the statement when it locks an entry.`,
+    );
+  }
+  const { groupTitle, journals } = await fetchJournals(client, id);
+  const legs = journals.map((journal) => {
+    const notes = String(journal.notes ?? '');
+    const lines = notes === '' ? [] : notes.split('\n');
+    let tags = tagList(journal.tags);
+    if (params.reconciled) {
+      if (stamp && !lines.includes(stamp)) lines.push(stamp);
+      if (!tags.includes(RECONCILED_TAG)) tags = [...tags, RECONCILED_TAG];
+    } else {
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].startsWith(STAMP_PREFIX))
+          lines[i] = `Was reconciled: ${lines[i].slice(STAMP_PREFIX.length).trim()}`;
+      }
+      lines.push(`Unlocked ${todayLocal(now)}: ${reason}`);
+      tags = tags.filter((tag) => tag !== RECONCILED_TAG);
+    }
+    return {
+      transaction_journal_id: String(journal.transaction_journal_id),
+      reconciled: params.reconciled,
+      notes: lines.join('\n'),
+      tags,
+    };
+  });
+  const body: Record<string, unknown> = { apply_rules: APPLY_RULES, fire_webhooks: true, transactions: legs };
+  if (legs.length > 1) body.group_title = groupTitle ?? String(journals[0].description ?? '');
+  const response = await lockBypass.run(true, () => client.put<JsonApiSingleResponse>(`/transactions/${id}`, body));
+  return unwrapSingle(response);
 }
 
 export async function searchTransactions(
@@ -699,6 +763,28 @@ export function registerTransactionTools(server: McpServer, client: FireflyClien
       annotations: DELETE_ANNOTATIONS,
     },
     ({ id }) => deleteTransaction(client, id),
+  );
+
+  defineTool(
+    server,
+    'set_reconciled',
+    {
+      title: 'Set Reconciled (review worker only)',
+      description:
+        "Mark an entry reconciled against its bank statement (locking it on every field), or unlock it for a change Andrew has okayed. Needs the review worker's unlock key; refused without it. Agents do not use this tool.",
+      inputSchema: {
+        id: z.string().describe(groupIdField('locks or unlocks')),
+        reconciled: z.boolean().describe('true locks the entry as reconciled; false unlocks it'),
+        unlock_key: z.string().describe("The review worker's unlock key"),
+        reason: z.string().describe("The card and Andrew's ok it carries out"),
+        stamp: z
+          .string()
+          .optional()
+          .describe('When locking: the notes line naming the statement, starting "Reconciled:"'),
+      },
+      annotations: UPDATE_ANNOTATIONS,
+    },
+    ({ id, ...params }) => setReconciled(client, id, params),
   );
 
   defineTool(

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { guardWrite } from './reconciled-lock.js';
 import type { QueryParams } from './types.js';
 
 export class FireflyError extends Error {
@@ -138,7 +139,18 @@ export class FireflyClient {
     return response;
   }
 
+  /**
+   * Household fork: every write is checked against the reconciled lock (reconciled-lock.ts) before it is sent, so no
+   * tool can change or delete an entry reconciled against its statement.
+   */
+  private async guard(method: string, url: string, body?: unknown): Promise<void> {
+    const parsed = new URL(url);
+    const path = parsed.pathname.replace(/^.*?\/api\/v1(?=\/|$)/, '');
+    await guardWrite((p, params) => this.get(p, params), method, path, parsed.searchParams, body);
+  }
+
   private async request<T>(method: string, url: string, body?: unknown): Promise<T> {
+    if (method !== 'GET') await this.guard(method, url, body);
     const response = await this.rawFetch(url, {
       method,
       headers: {
@@ -169,6 +181,7 @@ export class FireflyClient {
   }
 
   async postBinary(path: string, body: Uint8Array): Promise<void> {
+    await this.guard('POST', this.buildUrl(path));
     await this.rawFetch(this.buildUrl(path), {
       method: 'POST',
       headers: {

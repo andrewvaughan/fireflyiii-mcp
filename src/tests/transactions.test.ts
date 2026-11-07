@@ -173,7 +173,12 @@ describe('createTransaction', () => {
       '/transactions',
       expect.objectContaining({
         transactions: [
-          expect.objectContaining({ type: 'reconciliation', source_id: '1042', destination_id: '173', amount: '1883.00' }),
+          expect.objectContaining({
+            type: 'reconciliation',
+            source_id: '1042',
+            destination_id: '173',
+            amount: '1883.00',
+          }),
         ],
       }),
     );
